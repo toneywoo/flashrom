@@ -46,6 +46,9 @@ enum {
 	OPTION_WP_LIST,
 	OPTION_PROGRESS,
 	OPTION_SACRIFICE_RATIO,
+	OPTION_HEXDUMP,
+	OPTION_HEXDUMP_ADDR,
+	OPTION_HEXDUMP_LEN,
 #if CONFIG_RPMC_ENABLED == 1
 	OPTION_RPMC_READ_DATA,
 	OPTION_RPMC_WRITE_ROOT_KEY,
@@ -85,6 +88,11 @@ struct cli_options {
 	char *referencefile;
 	const char *chip_to_probe;
 	int sacrifice_ratio;
+
+	/* hexdump options */
+	bool do_hexdump;
+	unsigned int hexdump_addr;
+	unsigned int hexdump_len;
 
 #if CONFIG_RPMC_ENABLED == 1
 	bool rpmc_read_data;
@@ -151,6 +159,10 @@ static void cli_classic_usage(const char *name)
 	       "                                    operation VS the longevity of the chip. Default is\n"
 	       "                                    longevity.\n"
 	       "                                    DANGEROUS! It wears your chip faster!\n"
+	       "HEXDUMP OPTIONS\n"
+	       "      --hexdump                     dump flash content in hex+ASCII format\n"
+	       "      --hexdump-addr <addr>         start address for hexdump (default: 0)\n"
+	       "      --hexdump-len <len>           number of bytes to dump (required with --hexdump)\n"
 #if CONFIG_RPMC_ENABLED == 1
 	       "RPMC COMMANDS\n"
 	       "      --get-rpmc-status             read the extended status\n"
@@ -288,6 +300,96 @@ static const char *get_wp_error_str(int err)
 		return "can't operate on current WP configuration of the chip";
 	}
 	return "unknown WP error";
+}
+
+/*
+ * Hexdump function: display flash content in hex + ASCII format
+ * Format: offset | hex bytes (16 per line, grouped in 8) | ASCII representation
+ */
+static void print_hexdump(const uint8_t *data, unsigned int start_addr, unsigned int len)
+{
+	unsigned int i, j;
+	
+	for (i = 0; i < len; i += 16) {
+		/* Print address offset */
+		msg_ginfo("%08X  ", start_addr + i);
+		
+		/* Print hex bytes - first group of 8 */
+		for (j = 0; j < 8 && (i + j) < len; j++) {
+			msg_ginfo("%02X ", data[i + j]);
+		}
+		/* Add extra space if less than 8 bytes */
+		for (; j < 8; j++) {
+			msg_ginfo("   ");
+		}
+		
+		msg_ginfo(" ");
+		
+		/* Print hex bytes - second group of 8 */
+		for (j = 8; j < 16 && (i + j) < len; j++) {
+			msg_ginfo("%02X ", data[i + j]);
+		}
+		/* Add extra space if less than 16 bytes */
+		for (; j < 16; j++) {
+			msg_ginfo("   ");
+		}
+		
+		msg_ginfo(" |");
+		
+		/* Print ASCII representation */
+		for (j = 0; j < 16 && (i + j) < len; j++) {
+			uint8_t c = data[i + j];
+			if (c >= 32 && c <= 126) {
+				msg_ginfo("%c", c);
+			} else {
+				msg_ginfo(".");
+			}
+		}
+		msg_ginfo("|\n");
+	}
+}
+
+static int hexdump_cli(struct flashctx *flash, unsigned int addr, unsigned int len)
+{
+	uint8_t *buffer;
+	int ret;
+	
+	/* Validate parameters */
+	if (len == 0) {
+		msg_gerr("Error: hexdump length must be greater than 0\n");
+		return 1;
+	}
+	
+	if (addr + len > flash->chip->total_size * 1024) {
+		msg_gerr("Error: hexdump range (0x%X + %u = 0x%X) exceeds chip size (0x%X)\n",
+			 addr, len, addr + len, flash->chip->total_size * 1024);
+		return 1;
+	}
+	
+	/* Allocate buffer */
+	buffer = malloc(len);
+	if (!buffer) {
+		msg_gerr("Error: failed to allocate %u bytes for hexdump\n", len);
+		return 1;
+	}
+	
+	/* Read data from flash */
+	msg_ginfo("Reading 0x%X bytes from address 0x%08X...\n", len, addr);
+	ret = read_flash(flash, buffer, addr, len);
+	if (ret != 0) {
+		msg_gerr("Error: failed to read from flash\n");
+		free(buffer);
+		return 1;
+	}
+	
+	/* Display hexdump */
+	msg_ginfo("\n===== Flash Hexdump =====\n");
+	msg_ginfo("Address range: 0x%08X - 0x%08X (%u bytes)\n\n", addr, addr + len - 1, len);
+	print_hexdump(buffer, addr, len);
+	msg_ginfo("\n=========================\n");
+	
+	free(buffer);
+	return 0;
 }
 
 static int wp_cli(
@@ -998,6 +1100,16 @@ static void parse_options(int argc, char **argv, const char *optstring,
 			/* It is okay to convert invalid input to 0. */
 			options->sacrifice_ratio = atoi(optarg);
 			break;
+		case OPTION_HEXDUMP:
+			options->do_hexdump = true;
+			cli_classic_validate_singleop(&operation_specified);
+			break;
+		case OPTION_HEXDUMP_ADDR:
+			options->hexdump_addr = strtoumax(optarg, NULL, 16);
+			break;
+		case OPTION_HEXDUMP_LEN:
+			options->hexdump_len = strtoumax(optarg, NULL, 10);
+			break;
 #if CONFIG_RPMC_ENABLED == 1
 		case OPTION_RPMC_READ_DATA:
 			options->rpmc_read_data = true;
@@ -1102,6 +1214,9 @@ int main(int argc, char *argv[])
 		{"output",		1, NULL, 'o'},
 		{"progress",		0, NULL, OPTION_PROGRESS},
 		{"sacrifice-ratio",	1, NULL, OPTION_SACRIFICE_RATIO},
+		{"hexdump",		0, NULL, OPTION_HEXDUMP},
+		{"hexdump-addr",	1, NULL, OPTION_HEXDUMP_ADDR},
+		{"hexdump-len",		1, NULL, OPTION_HEXDUMP_LEN},
 #if CONFIG_RPMC_ENABLED == 1
 		{"get-rpmc-status",	0, NULL, OPTION_RPMC_READ_DATA},
 		{"write-root-key",	0, NULL, OPTION_RPMC_WRITE_ROOT_KEY},
@@ -1334,7 +1449,7 @@ int main(int argc, char *argv[])
 
 	const bool any_op = options.read_it || options.write_it || options.verify_it ||
 		options.erase_it || options.flash_name || options.flash_size ||
-		options.extract_it || any_wp_op || any_rpmc_op;
+		options.extract_it || options.do_hexdump || any_wp_op || any_rpmc_op;
 
 	if (!any_op) {
 		msg_ginfo("No operations were specified.\n");
@@ -1562,6 +1677,15 @@ int main(int argc, char *argv[])
 		ret = do_write(context, options.filename, options.referencefile);
 	else if (options.verify_it)
 		ret = do_verify(context, options.filename);
+	else if (options.do_hexdump) {
+		/* Validate hexdump parameters */
+		if (options.hexdump_len == 0) {
+			msg_gerr("Error: --hexdump-len is required with --hexdump\n");
+			ret = 1;
+		} else {
+			ret = hexdump_cli(context, options.hexdump_addr, options.hexdump_len);
+		}
+	}
 
 #if CONFIG_RPMC_ENABLED == 1
 	if (any_rpmc_op && ret == 0) {

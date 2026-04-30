@@ -132,7 +132,7 @@
 			}
 		},
 		.printlock	= SPI_PRETTYPRINT_STATUS_REGISTER_SRWD_SEC_TB_BP2_WELWIP,
-		.unlock		= SPI_DISABLE_BLOCKPROTECT,
+		.unlock		= SPI_DISABLE_BLOCKPROTECT_W25Q_SR3_WPS,
 		.write		= SPI_CHIP_WRITE256,
 		.read		= SPI_CHIP_READ,
 		.voltage	= {2700, 3600},

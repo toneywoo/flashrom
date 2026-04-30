@@ -374,6 +374,65 @@ static int spi_disable_blockprotect_sst26_global_unprotect(struct flashctx *flas
 	return result;
 }
 
+/*
+ * W25Q series specific unlock: Clear WPS (Write Protect Select) bit in SR3.
+ * 
+ * For W25Q128 and similar chips, the WPS bit (SR3 Bit 2) controls write protection mode.
+ * When WPS=1, the chip uses a different protection scheme that may prevent writes.
+ * This function clears the WPS bit using the dedicated 0x11 (WRSR3) command.
+ *
+ * Reference: W25Q128JV Datasheet - Write Status Register-3 (11h)
+ * SR3 structure: [7:6]Reserved [5]HOLD/RST [4]SUS [3]CMP [2]WPS [1:0]DRV
+ */
+static int spi_disable_blockprotect_w25q_sr3_wps(struct flashctx *flash)
+{
+	uint8_t sr3;
+	int ret;
+
+	/* Read current SR3 value */
+	ret = spi_read_register(flash, STATUS3, &sr3);
+	if (ret) {
+		msg_cerr("Failed to read SR3.\n");
+		return ret;
+	}
+
+	msg_cdbg("Current SR3 value: 0x%02x\n", sr3);
+
+	/* Check if WPS bit (Bit 2) is already cleared */
+	if ((sr3 & (1 << 2)) == 0) {
+		msg_cdbg("WPS bit is already cleared (0). No action needed.\n");
+		return 0;
+	}
+
+	/* Clear WPS bit (Bit 2) while preserving other bits */
+	uint8_t new_sr3 = sr3 & ~(1 << 2);  /* Clear Bit 2 (WPS) */
+	new_sr3 &= 0xFB;  /* Force clear Bit 2, equivalent to &(~0x04) */
+
+	msg_cdbg("Clearing WPS bit. New SR3 value will be: 0x%02x\n", new_sr3);
+
+	/* Write new SR3 value using dedicated 0x11 (WRSR3) command */
+	ret = spi_write_register(flash, STATUS3, new_sr3);
+	if (ret) {
+		msg_cerr("Failed to write SR3 with cleared WPS bit.\n");
+		return ret;
+	}
+
+	/* Verify the write was successful */
+	ret = spi_read_register(flash, STATUS3, &sr3);
+	if (ret) {
+		msg_cerr("Failed to verify SR3 after write.\n");
+		return ret;
+	}
+
+	if ((sr3 & (1 << 2)) != 0) {
+		msg_cerr("Warning: WPS bit could not be cleared! SR3 = 0x%02x\n", sr3);
+		return 1;
+	}
+
+	msg_cdbg("SUCCESS: WPS bit cleared. SR3 = 0x%02x\n", sr3);
+	return 0;
+}
+
 /* A common block protection disable that tries to unset the status register bits masked by 0x0C (BP0-1) and
  * protected/locked by bit #7. Useful when bits 4-5 may be non-0). */
 static int spi_disable_blockprotect_bp1_srwd(struct flashctx *flash)
@@ -916,6 +975,7 @@ blockprotect_func_t *lookup_blockprotect_func_ptr(const struct flashchip *const 
 		case SPI_DISABLE_BLOCKPROTECT_AT2X_GLOBAL_UNPROTECT_SEC: return spi_disable_blockprotect_at2x_global_unprotect_sec;
 		case SPI_DISABLE_BLOCKPROTECT_SST26_GLOBAL_UNPROTECT: return spi_disable_blockprotect_sst26_global_unprotect;
 		case SPI_DISABLE_BLOCKPROTECT_N25Q: return spi_disable_blockprotect_n25q;
+		case SPI_DISABLE_BLOCKPROTECT_W25Q_SR3_WPS: return spi_disable_blockprotect_w25q_sr3_wps;
 		/* fallthough to lookup_jedec_blockprotect_func_ptr() */
 		case UNLOCK_REGSPACE2_BLOCK_ERASER_0:
 		case UNLOCK_REGSPACE2_BLOCK_ERASER_1:
